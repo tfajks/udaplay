@@ -166,9 +166,15 @@ def get_game_stats(title: str) -> dict:
 
 class UdaPlayAgent:
     def __init__(self):
-        self.conversation_history: list[dict] = []
+        # Keyed by session_id so each user's conversation is isolated.
+        self._sessions: dict[str, list[dict]] = {}
 
-    def invoke(self, query: str) -> dict:
+    def _get_history(self, session_id: str) -> list[dict]:
+        if session_id not in self._sessions:
+            self._sessions[session_id] = []
+        return self._sessions[session_id]
+
+    def invoke(self, query: str, session_id: str = 'default') -> dict:
         ctx = AgentContext(query=query)
 
         while ctx.state != AgentState.DONE:
@@ -179,10 +185,11 @@ class UdaPlayAgent:
             elif ctx.state == AgentState.WEB_SEARCH:
                 self._web_search(ctx)
             elif ctx.state == AgentState.REPORT:
-                self._report(ctx)
+                self._report(ctx, session_id)
 
-        self.conversation_history.append({'role': 'user',      'content': query})
-        self.conversation_history.append({'role': 'assistant', 'content': ctx.final_answer})
+        history = self._get_history(session_id)
+        history.append({'role': 'user',      'content': query})
+        history.append({'role': 'assistant', 'content': ctx.final_answer})
         return {'answer': ctx.final_answer, 'source': ctx.source,
                 'confidence': ctx.confidence, 'citations': ctx.citations}
 
@@ -215,7 +222,7 @@ class UdaPlayAgent:
         print(f'  Web search: {len(ctx.web_results)} results found (saved to memory)', flush=True)
         ctx.state = AgentState.REPORT
 
-    def _report(self, ctx: AgentContext):
+    def _report(self, ctx: AgentContext, session_id: str = 'default'):
         if ctx.source == 'rag':
             context_text = '\n---\n'.join(ctx.retrieved_docs)
         else:
@@ -224,8 +231,9 @@ class UdaPlayAgent:
             )
 
         history_text = ''
-        if self.conversation_history:
-            recent = self.conversation_history[-6:]  # last 3 turns
+        history = self._get_history(session_id)
+        if history:
+            recent = history[-6:]  # last 3 turns for this session only
             parts = []
             for i in range(0, len(recent) - 1, 2):
                 parts.append(f"Q: {recent[i]['content']}\nA: {recent[i+1]['content']}")
@@ -253,11 +261,15 @@ class UdaPlayAgent:
 # ------------------------------------------------------------------ #
 
 def main():
+    import uuid
+    session_id = str(uuid.uuid4())
+
     print('=' * 60)
     print('  UdaPlay — Gaming Research Agent')
+    print(f'  Session: {session_id[:8]}...')
     print('  Type your question, or:')
     print('    /stats <game title>  — show structured stats')
-    print('    /history             — show conversation history')
+    print('    /history             — show this session\'s history')
     print('    /quit                — exit')
     print('=' * 60)
 
@@ -278,10 +290,11 @@ def main():
             break
 
         if user_input.lower() == '/history':
-            if not agent.conversation_history:
+            history = agent._get_history(session_id)
+            if not history:
                 print('No conversation history yet.')
             else:
-                for msg in agent.conversation_history:
+                for msg in history:
                     prefix = 'You' if msg['role'] == 'user' else 'Agent'
                     print(f'\n{prefix}: {msg["content"]}')
             continue
@@ -293,7 +306,7 @@ def main():
             continue
 
         print()
-        result = agent.invoke(user_input)
+        result = agent.invoke(user_input, session_id=session_id)
         print(f'\nAgent ({result["source"].upper()}, confidence {result["confidence"]:.0%}):')
         print(result['answer'])
         if result['citations']:
